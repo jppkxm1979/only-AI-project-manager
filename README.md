@@ -8,6 +8,7 @@ This repository is the guardian and manager for `jppkxm1979/only-AI-project`.
 - It does not build the target product.
 - It monitors and stabilizes the target repository.
 - It can re-enable target workflows, close stale blocked autonomous PRs, and trigger recovery workflows.
+- It maintains a simple guardian stability report issue in this repository.
 
 ## Recommended Auth
 

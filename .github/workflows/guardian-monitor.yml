@@ -22,10 +22,10 @@ jobs:
 
     steps:
       - name: Check out manager repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -101,7 +101,7 @@ jobs:
 
       - name: Monitor and recover target repository
         id: manage
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{ steps.auth.outputs.token }}
           script: |
@@ -250,6 +250,49 @@ jobs:
             }
 
             core.setOutput('summary', summary.join('\n'));
+
+      - name: Publish guardian stability report
+        if: always() && steps.auth.outputs.token != ''
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const title = 'Guardian Stability Report';
+            const body = [
+              'Latest guardian run summary.',
+              '',
+              '```text',
+              `${{ steps.manage.outputs.summary || 'no summary available' }}`,
+              '```',
+            ].join('\n');
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              labels: 'guardian-report',
+              per_page: 100,
+            });
+
+            const existing = issues.find((issue) => issue.title === title);
+            if (existing) {
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body,
+                labels: ['guardian-report'],
+              });
+            }
 
       - name: Write workflow summary
         if: always()
