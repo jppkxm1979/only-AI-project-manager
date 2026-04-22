@@ -1,0 +1,253 @@
+name: Guardian Monitor
+
+on:
+  schedule:
+    - cron: "13 3 * * *"
+    - cron: "29 9 * * *"
+    - cron: "47 15 * * *"
+    - cron: "5 21 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guardian-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out manager repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Load manager configuration
+        id: config
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("automation/manager.json", "r", encoding="utf-8") as handle:
+              cfg = json.load(handle)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              for key, value in cfg.items():
+                  if isinstance(value, list):
+                      handle.write(f"{key}<<EOF\n")
+                      handle.write("\n".join(str(item) for item in value))
+                      handle.write("\nEOF\n")
+                  else:
+                      handle.write(f"{key}={value}\n")
+          PY
+
+      - name: Create GitHub App token
+        id: app_token
+        if: vars.GUARDIAN_APP_CLIENT_ID != '' && secrets.GUARDIAN_APP_PRIVATE_KEY != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.GUARDIAN_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GUARDIAN_APP_PRIVATE_KEY }}
+          owner: ${{ steps.config.outputs.target_owner }}
+          repositories: ${{ steps.config.outputs.target_repo }}
+          permission-actions: write
+          permission-contents: write
+          permission-issues: write
+          permission-metadata: read
+          permission-pull-requests: write
+
+      - name: Select target repository token
+        id: auth
+        env:
+          APP_TOKEN: ${{ steps.app_token.outputs.token }}
+          FALLBACK_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+        run: |
+          if [ -n "$APP_TOKEN" ]; then
+            echo "::add-mask::$APP_TOKEN"
+            echo "token=$APP_TOKEN" >> "$GITHUB_OUTPUT"
+            echo "mode=github_app" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -n "$FALLBACK_TOKEN" ]; then
+            echo "::add-mask::$FALLBACK_TOKEN"
+            echo "token=$FALLBACK_TOKEN" >> "$GITHUB_OUTPUT"
+            echo "mode=fallback_token" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "No cross-repository token configured."
+          exit 1
+
+      - name: Monitor and recover target repository
+        id: manage
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.auth.outputs.token }}
+          script: |
+            const owner = '${{ steps.config.outputs.target_owner }}';
+            const repo = '${{ steps.config.outputs.target_repo }}';
+            const staleHours = Number('${{ steps.config.outputs.stale_pr_close_hours }}');
+            const heartbeatAfterDays = Number('${{ steps.config.outputs.heartbeat_after_days_without_push }}');
+            const forceProposeAfterDays = Number('${{ steps.config.outputs.force_propose_after_days_without_push }}');
+            const managedLabels = `${{ steps.config.outputs.managed_labels }}`.split('\n').filter(Boolean);
+            const managedBranches = `${{ steps.config.outputs.managed_branches }}`.split('\n').filter(Boolean);
+            const workflowFiles = `${{ steps.config.outputs.workflows_to_keep_enabled }}`.split('\n').filter(Boolean);
+
+            const summary = [];
+            const repoInfo = await github.rest.repos.get({ owner, repo });
+            const defaultBranch = repoInfo.data.default_branch;
+            summary.push(`target=${owner}/${repo}`);
+            summary.push(`default_branch=${defaultBranch}`);
+
+            const workflows = await github.paginate(github.rest.actions.listRepoWorkflows, {
+              owner,
+              repo,
+              per_page: 100,
+            });
+            for (const fileName of workflowFiles) {
+              const workflow = workflows.find((item) => item.path.endsWith(`/${fileName}`));
+              if (!workflow) {
+                summary.push(`missing_workflow=${fileName}`);
+                continue;
+              }
+              if (workflow.state !== 'active') {
+                await github.rest.actions.enableWorkflow({
+                  owner,
+                  repo,
+                  workflow_id: workflow.id,
+                });
+                summary.push(`enabled_workflow=${fileName}`);
+              }
+            }
+
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const managedPrs = prs.filter((pr) => {
+              const byLabel = pr.labels.some((label) => managedLabels.includes(label.name));
+              const byBranch = managedBranches.includes(pr.head.ref);
+              return byLabel || byBranch;
+            });
+            summary.push(`managed_prs=${managedPrs.length}`);
+
+            for (const pr of managedPrs) {
+              const ageHours = (Date.now() - new Date(pr.created_at).getTime()) / (1000 * 60 * 60);
+              const fullPr = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: pr.number,
+              });
+
+              const checks = await github.rest.checks.listForRef({
+                owner,
+                repo,
+                ref: fullPr.data.head.sha,
+              });
+              const badCheck = checks.data.check_runs.find((check) =>
+                check.status !== 'completed' || check.conclusion !== 'success'
+              );
+
+              const statuses = await github.rest.repos.getCombinedStatusForRef({
+                owner,
+                repo,
+                ref: fullPr.data.head.sha,
+              });
+
+              const mergeable = ['clean', 'has_hooks', 'unstable'].includes(fullPr.data.mergeable_state);
+              const green = !badCheck && statuses.data.state === 'success';
+
+              if (ageHours >= staleHours && (!mergeable || !green)) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: pr.number,
+                  body: `Guardian manager closed this PR after ${ageHours.toFixed(1)} hours because it remained blocked or non-green.`,
+                });
+                await github.rest.pulls.update({
+                  owner,
+                  repo,
+                  pull_number: pr.number,
+                  state: 'closed',
+                });
+                await github.rest.git.deleteRef({
+                  owner,
+                  repo,
+                  ref: `heads/${pr.head.ref}`,
+                }).catch(() => {});
+                summary.push(`closed_stale_pr=#${pr.number}`);
+              }
+            }
+
+            const latest = await github.rest.repos.listCommits({
+              owner,
+              repo,
+              per_page: 1,
+            });
+            const latestCommit = latest.data[0];
+            if (!latestCommit) {
+              summary.push('no_commits_found=true');
+            } else {
+              const ageDays = (Date.now() - new Date(latestCommit.commit.committer.date).getTime()) / (1000 * 60 * 60 * 24);
+              summary.push(`last_push_age_days=${ageDays.toFixed(2)}`);
+
+              const openManagedPrs = (await github.paginate(github.rest.pulls.list, {
+                owner,
+                repo,
+                state: 'open',
+                per_page: 100,
+              })).filter((pr) => {
+                const byLabel = pr.labels.some((label) => managedLabels.includes(label.name));
+                const byBranch = managedBranches.includes(pr.head.ref);
+                return byLabel || byBranch;
+              });
+
+              if (openManagedPrs.length === 0 && ageDays >= heartbeatAfterDays) {
+                await github.rest.actions.createWorkflowDispatch({
+                  owner,
+                  repo,
+                  workflow_id: 'autonomous-keepalive.yml',
+                  ref: defaultBranch,
+                });
+                summary.push('dispatched=autonomous-keepalive.yml');
+              }
+
+              if (openManagedPrs.length === 0 && ageDays >= forceProposeAfterDays) {
+                await github.rest.actions.createWorkflowDispatch({
+                  owner,
+                  repo,
+                  workflow_id: 'autonomous-propose.yml',
+                  ref: defaultBranch,
+                  inputs: {
+                    force_run: 'true',
+                  },
+                });
+                summary.push('dispatched=autonomous-propose.yml');
+              }
+            }
+
+            core.setOutput('summary', summary.join('\n'));
+
+      - name: Write workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Guardian Monitor"
+            echo ""
+            echo "- Auth mode: ${{ steps.auth.outputs.mode || 'none' }}"
+            echo ""
+            echo '```text'
+            printf '%s\n' "${{ steps.manage.outputs.summary }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

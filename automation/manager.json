@@ -1,0 +1,21 @@
+{
+  "target_owner": "jppkxm1979",
+  "target_repo": "only-AI-project",
+  "managed_labels": [
+    "autonomous-evolution",
+    "autonomous-heartbeat"
+  ],
+  "managed_branches": [
+    "autonomy/proposal",
+    "autonomy/heartbeat"
+  ],
+  "workflows_to_keep_enabled": [
+    "autonomous-propose.yml",
+    "autonomous-merge.yml",
+    "autonomous-keepalive.yml",
+    "autonomous-verify.yml"
+  ],
+  "stale_pr_close_hours": 168,
+  "heartbeat_after_days_without_push": 30,
+  "force_propose_after_days_without_push": 7
+}
