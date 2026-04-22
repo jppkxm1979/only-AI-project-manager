@@ -49,9 +49,21 @@ jobs:
                       handle.write(f"{key}={value}\n")
           PY
 
+      - name: Check whether GitHub App credentials exist
+        id: app_creds
+        env:
+          APP_CLIENT_ID: ${{ vars.GUARDIAN_APP_CLIENT_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.GUARDIAN_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_CLIENT_ID" ] && [ -n "$APP_PRIVATE_KEY" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create GitHub App token
         id: app_token
-        if: vars.GUARDIAN_APP_CLIENT_ID != '' && secrets.GUARDIAN_APP_PRIVATE_KEY != ''
+        if: steps.app_creds.outputs.available == 'true'
         uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ vars.GUARDIAN_APP_CLIENT_ID }}
