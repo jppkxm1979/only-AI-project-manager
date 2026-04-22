@@ -34,3 +34,4 @@ The current default target is `jppkxm1979/only-AI-project`.
 ## Quick Start
 
 Follow [SETUP.md](C:/Users/Administrator/Documents/GitHub/only-AI-project-manager/SETUP.md) to connect this manager repository to the target repository.
+Short version: [CHECKLIST.md](C:/Users/Administrator/Documents/GitHub/only-AI-project-manager/CHECKLIST.md)
